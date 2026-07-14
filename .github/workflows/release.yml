@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name for the release (strict semver, e.g. v1.2.3 or 1.2.3)'
+        description: 'Tag name for the release (strict semver, e.g. 1.2.3)'
         required: true
-        type: string
+        type: number
 
 permissions:
   contents: write
@@ -14,15 +14,17 @@ permissions:
 jobs:
   package-and-release:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN}}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
 
       - name: Validate tag is strict semver
         run: |
           TAG="${{ inputs.tag_name }}"
-          if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag '$TAG' is not valid semver. Expected format: v1.2.3 or 1.2.3"
+          if ! [[ "${{ inputs.tag_name }}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '${{ inputs.tag_name }}' is not a valid semver. Expected format: 1.2.3"
             exit 1
           fi
 
@@ -36,8 +38,6 @@ jobs:
             echo "::error::Release '${{ inputs.tag_name }}' already exists. Choose a different tag name."
             exit 1
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify tag contains manifest version as substring
         run: |
@@ -52,6 +52,36 @@ jobs:
             exit 1
           fi
           echo "Manifest version '$MANIFEST_VERSION' confirmed within tag '$TAG'."
+
+      - name: Generate updates.json
+        run: |
+          ADDON_ID=$(jq -r '.browser_specific_settings.gecko.id' theme/manifest.json)
+          MANIFEST_VERSION=$(jq -r '.version' theme/manifest.json)
+          REPO="${{ github.repository }}"
+          TAG="${{ inputs.tag_name }}"
+          UPDATE_LINK="https://github.com/${REPO}/releases/download/${TAG}/Perfectly-OLED-${TAG}.xpi"
+
+          jq -n \
+            --arg id "$ADDON_ID" \
+            --arg version "$MANIFEST_VERSION" \
+            --arg link "$UPDATE_LINK" \
+            '{addons: {($id): {updates: [{version: $version, update_link: $link}]}}}' \
+            > theme/updates.json
+
+          echo "Generated theme/updates.json:"
+          cat theme/updates.json
+
+      - name: Commit updates.json to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add theme/updates.json
+          if git diff --cached --quiet; then
+            echo "No changes to updates.json to commit."
+          else
+            git commit -m "Update theme/updates.json for ${{ inputs.tag_name }}"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
 
       - name: Package as .zip
         run: |
@@ -77,5 +107,3 @@ jobs:
             "Perfectly-OLED-${{ inputs.tag_name }}.xpi" \
             --title "${{ inputs.tag_name }}" \
             --notes "Automated packaging of `/theme/` folder as .zip and .xpi"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
