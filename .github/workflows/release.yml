@@ -1,109 +1,191 @@
-name: Package and Release Theme
+name: Release Theme
 
 on:
   workflow_dispatch:
     inputs:
-      tag_name:
-        description: 'Tag name for the release (strict semver, e.g. 1.2.3)'
+      version:
+        description: "Semver to release, e.g. 1.2.3 (a 'v' prefix will be added automatically)"
         required: true
-        type: number
+        type: string
+      overwrite:
+        description: "If the tag already exists, overwrite it and the existing release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
-  package-and-release:
+  release:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN}}
+      THEME_DIR: theme
+      SEMVER: ${{ github.event.inputs.version }}
     steps:
+      - name: Validate semver input
+        run: |
+          if [[ ! "$SEMVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$SEMVER' is not a valid semver (expected e.g. 1.2.3, without a leading 'v')."
+            exit 1
+          fi
+          echo "TAG=v${SEMVER}" >> "$GITHUB_ENV"
+
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate tag is strict semver
+      - name: Check whether tag already exists
         run: |
-          TAG="${{ inputs.tag_name }}"
-          if ! [[ "${{ inputs.tag_name }}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag '${{ inputs.tag_name }}' is not a valid semver. Expected format: 1.2.3"
-            exit 1
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            if [ "${{ github.event.inputs.overwrite }}" != "true" ]; then
+              echo "::error::Tag ${TAG} already exists. Re-run with 'overwrite: true' to replace it."
+              exit 1
+            fi
+            echo "Tag ${TAG} exists; overwrite=true, will replace it."
+            echo "TAG_EXISTS=true" >> "$GITHUB_ENV"
+          else
+            echo "TAG_EXISTS=false" >> "$GITHUB_ENV"
           fi
 
-      - name: Verify tag does not already exist
+      - name: Validate theme manifest is valid JSON
         run: |
-          if git rev-parse "${{ inputs.tag_name }}" >/dev/null 2>&1; then
-            echo "::error::Tag '${{ inputs.tag_name }}' already exists. Choose a different tag name."
-            exit 1
-          fi
-          if gh release view "${{ inputs.tag_name }}" >/dev/null 2>&1; then
-            echo "::error::Release '${{ inputs.tag_name }}' already exists. Choose a different tag name."
-            exit 1
-          fi
+          python3 -c "import json,sys; json.load(open('${THEME_DIR}/manifest.json'))" \
+            || { echo "::error::${THEME_DIR}/manifest.json is not valid JSON."; exit 1; }
 
-      - name: Verify tag contains manifest version as substring
+      - name: Update theme/updates.json
         run: |
-          TAG="${{ inputs.tag_name }}"
-          MANIFEST_VERSION=$(jq -r '.version' theme/manifest.json)
-          if [ -z "$MANIFEST_VERSION" ] || [ "$MANIFEST_VERSION" == "null" ]; then
-            echo "::error::Could not read version from theme/manifest.json"
-            exit 1
-          fi
-          if [[ "$TAG" != *"$MANIFEST_VERSION"* ]]; then
-            echo "::error::Tag '$TAG' does not contain manifest.json version '$MANIFEST_VERSION' as a substring."
-            exit 1
-          fi
-          echo "Manifest version '$MANIFEST_VERSION' confirmed within tag '$TAG'."
+          set -euo pipefail
+          UPDATES_FILE="${THEME_DIR}/updates.json"
+          EXT_ID=$(python3 -c "import json; print(json.load(open('${THEME_DIR}/manifest.json'))['browser_specific_settings']['gecko']['id'])")
+          XPI_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/Perfectly-OLED-${SEMVER}.xpi"
 
-      - name: Generate updates.json
-        run: |
-          ADDON_ID=$(jq -r '.browser_specific_settings.gecko.id' theme/manifest.json)
-          MANIFEST_VERSION=$(jq -r '.version' theme/manifest.json)
-          REPO="${{ github.repository }}"
-          TAG="${{ inputs.tag_name }}"
-          UPDATE_LINK="https://github.com/${REPO}/releases/download/${TAG}/Perfectly-OLED-${TAG}.xpi"
+          mkdir -p "$(dirname "$UPDATES_FILE")"
 
-          jq -n \
-            --arg id "$ADDON_ID" \
-            --arg version "$MANIFEST_VERSION" \
-            --arg link "$UPDATE_LINK" \
-            '{addons: {($id): {updates: [{version: $version, update_link: $link}]}}}' \
-            > theme/updates.json
+          python3 - "$UPDATES_FILE" "$EXT_ID" "$SEMVER" "$XPI_URL" <<'EOF'
+          import json, sys, os
 
-          echo "Generated theme/updates.json:"
-          cat theme/updates.json
+          updates_file, ext_id, version, xpi_url = sys.argv[1:5]
 
-      - name: Commit updates.json to repository
+          if os.path.exists(updates_file):
+              with open(updates_file) as f:
+                  data = json.load(f)
+          else:
+              data = {"addons": {}}
+
+          data.setdefault("addons", {})
+          data["addons"].setdefault(ext_id, {"updates": []})
+
+          # Drop any existing entry for this exact version, then add the fresh one.
+          updates = [u for u in data["addons"][ext_id].get("updates", []) if u.get("version") != version]
+          updates.append({
+              "version": version,
+              "update_link": xpi_url
+          })
+          data["addons"][ext_id]["updates"] = updates
+
+          with open(updates_file, "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          EOF
+
+          echo "Updated ${UPDATES_FILE}:"
+          cat "$UPDATES_FILE"
+
+      - name: Commit updates.json
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add theme/updates.json
+          git add "${THEME_DIR}/updates.json"
           if git diff --cached --quiet; then
             echo "No changes to updates.json to commit."
           else
-            git commit -m "Update theme/updates.json for ${{ inputs.tag_name }}"
+            git commit -m "chore: update updates.json for ${TAG}"
             git push origin HEAD:${{ github.ref_name }}
           fi
 
-      - name: Package as .zip
+      - name: Package theme (zip)
         run: |
-          cd theme
-          zip -X -r "../Perfectly-OLED-${{ inputs.tag_name }}.zip" .
-          cd ..
+          set -euo pipefail
+          STAGE_DIR="$(mktemp -d)/Perfectly-OLED"
+          mkdir -p "$STAGE_DIR"
+          cp -r "${THEME_DIR}/." "$STAGE_DIR/"
 
-      - name: Package as .xpi
-        run: |
-          cd theme
-          zip -X -r "../Perfectly-OLED-${{ inputs.tag_name }}.xpi" .
-          cd ..
+          mkdir -p dist
+          ( cd "$STAGE_DIR" && zip -r -X "${GITHUB_WORKSPACE}/dist/Perfectly-OLED-${SEMVER}.zip" . )
+          ( cd "$STAGE_DIR" && tar -czf "${GITHUB_WORKSPACE}/dist/Perfectly-OLED-${SEMVER}.tar.gz" . )
 
-      - name: Create git tag
-        run: |
-          git tag "${{ inputs.tag_name }}"
-          git push origin "${{ inputs.tag_name }}"
+          echo "STAGE_DIR=$STAGE_DIR" >> "$GITHUB_ENV"
 
-      - name: Create GitHub release with artifacts
+      - name: Install web-ext
+        run: npm install --global web-ext
+
+      - name: Sign with AMO (if credentials are configured)
+        id: sign
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
-          gh release create "${{ inputs.tag_name }}" \
-            "Perfectly-OLED-${{ inputs.tag_name }}.zip" \
-            "Perfectly-OLED-${{ inputs.tag_name }}.xpi" \
-            --title "${{ inputs.tag_name }}" \
-            --notes "Automated packaging of `/theme/` folder as .zip and .xpi"
+          set -euo pipefail
+          mkdir -p dist/signed
+          if [ -n "${WEB_EXT_API_KEY:-}" ] && [ -n "${WEB_EXT_API_SECRET:-}" ]; then
+            echo "AMO credentials found, attempting signing..."
+            if web-ext sign \
+                --source-dir "${STAGE_DIR}" \
+                --artifacts-dir dist/signed \
+                --channel listed \
+                --api-key "$WEB_EXT_API_KEY" \
+                --api-secret "$WEB_EXT_API_SECRET"; then
+              SIGNED_XPI=$(find dist/signed -maxdepth 1 -name "*.xpi" | head -n1)
+              if [ -n "$SIGNED_XPI" ]; then
+                cp "$SIGNED_XPI" "dist/Perfectly-OLED-${SEMVER}.xpi"
+                echo "signed=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::warning::web-ext sign succeeded but no .xpi artifact was found; falling back to unsigned package."
+                echo "signed=false" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "::warning::web-ext sign failed (theme may need to be listed on AMO first, or credentials are invalid). Falling back to an unsigned .xpi."
+              echo "signed=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::notice::AMO_JWT_ISSUER / AMO_JWT_SECRET secrets not set; skipping signing and producing an unsigned .xpi."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build unsigned .xpi (fallback)
+        if: steps.sign.outputs.signed != 'true'
+        run: |
+          cp "dist/Perfectly-OLED-${SEMVER}.zip" "dist/Perfectly-OLED-${SEMVER}.xpi"
+
+      - name: Delete existing tag/release if overwriting
+        if: env.TAG_EXISTS == 'true'
+        run: |
+          gh release delete "${TAG}" --yes || true
+          git push --delete origin "${TAG}" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create tag
+        run: |
+          git tag -f "${TAG}"
+          git push -f origin "${TAG}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UNSIGNED_NOTE="⚠️ The .xpi in this release is **unsigned** (no AMO signing credentials configured, or signing failed). Install via about:config with xpinstall.signatures.required=false, or use the version listed on addons.mozilla.org for a signed build."
+          NOTES="Release ${TAG}"
+          if [ "${{ steps.sign.outputs.signed }}" != "true" ]; then
+            NOTES=$(printf '%s\n\n%s' "$NOTES" "$UNSIGNED_NOTE")
+          fi
+
+          gh release create "${TAG}" \
+            "dist/Perfectly-OLED-${SEMVER}.xpi" \
+            "dist/Perfectly-OLED-${SEMVER}.zip" \
+            "dist/Perfectly-OLED-${SEMVER}.tar.gz" \
+            --title "${TAG}" \
+            --notes "${NOTES}" \
+            ${{ env.TAG_EXISTS == 'true' && '--latest' || '' }}
