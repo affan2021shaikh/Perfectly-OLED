@@ -144,7 +144,7 @@ jobs:
       - name: Build unsigned .xpi (fallback)
         if: steps.sign.outputs.signed != 'true'
         run: |
-          cp "dist/Perfectly-OLED-${SEMVER}.zip" "dist/Perfectly-OLED-${SEMVER}.xpi"
+          cp "dist/Truly-OLED-${SEMVER}.zip" "dist/Truly-OLED-${SEMVER}.xpi"
 
       - name: Delete existing tag/release if overwriting
         if: env.TAG_EXISTS == 'true'
@@ -170,9 +170,9 @@ jobs:
           fi
 
           gh release create "${TAG}" \
-            "dist/Perfectly-OLED-${SEMVER}.xpi" \
-            "dist/Perfectly-OLED-${SEMVER}.zip" \
-            "dist/Perfectly-OLED-${SEMVER}.tar.gz" \
+            "dist/Truly-OLED-${SEMVER}.xpi" \
+            "dist/Truly-OLED-${SEMVER}.zip" \
+            "dist/Truly-OLED-${SEMVER}.tar.gz" \
             --title "${TAG}" \
             --notes "${NOTES}" \
             ${{ env.TAG_EXISTS == 'true' && '--latest' || '' }}
