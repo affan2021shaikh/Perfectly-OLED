@@ -38,7 +38,7 @@ jobs:
       TAG_EXISTS: ${{ needs.validate-version.outputs.tag_exists }}
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           UPDATES_FILE="${THEME_DIR}/updates.json"
           EXT_ID=$(python3 -c "import json; print(json.load(open('${THEME_DIR}/manifest.json'))['browser_specific_settings']['gecko']['id'])")
-          XPI_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/Perfectly-OLED-${SEMVER}.xpi"
+          XPI_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/Truly-OLED-${SEMVER}.xpi"
 
           mkdir -p "$(dirname "$UPDATES_FILE")"
 
@@ -95,13 +95,13 @@ jobs:
       - name: Package theme (zip)
         run: |
           set -euo pipefail
-          STAGE_DIR="$(mktemp -d)/Perfectly-OLED"
+          STAGE_DIR="$(mktemp -d)/Truly-OLED"
           mkdir -p "$STAGE_DIR"
           cp -r "${THEME_DIR}/." "$STAGE_DIR/"
 
           mkdir -p dist
-          ( cd "$STAGE_DIR" && zip -r -X "${GITHUB_WORKSPACE}/dist/Perfectly-OLED-${SEMVER}.zip" . )
-          ( cd "$STAGE_DIR" && tar -czf "${GITHUB_WORKSPACE}/dist/Perfectly-OLED-${SEMVER}.tar.gz" . )
+          ( cd "$STAGE_DIR" && zip -r -X "${GITHUB_WORKSPACE}/dist/Truly-OLED-${SEMVER}.zip" . )
+          ( cd "$STAGE_DIR" && tar -czf "${GITHUB_WORKSPACE}/dist/Truly-OLED-${SEMVER}.tar.gz" . )
 
           echo "STAGE_DIR=$STAGE_DIR" >> "$GITHUB_ENV"
 
@@ -126,7 +126,7 @@ jobs:
                 --api-secret "$WEB_EXT_API_SECRET"; then
               SIGNED_XPI=$(find dist/signed -maxdepth 1 -name "*.xpi" | head -n1)
               if [ -n "$SIGNED_XPI" ]; then
-                cp "$SIGNED_XPI" "dist/Perfectly-OLED-${SEMVER}.xpi"
+                cp "$SIGNED_XPI" "dist/Truly-OLED-${SEMVER}.xpi"
                 echo "signed=true" >> "$GITHUB_OUTPUT"
               else
                 echo "::warning::web-ext sign succeeded but no .xpi artifact was found; falling back to unsigned package."
@@ -159,12 +159,29 @@ jobs:
           git tag -f "${TAG}"
           git push -f origin "${TAG}"
 
+      - name: Generate auto release notes
+        id: autonotes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BODY=$(gh api \
+            -X POST \
+            "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="${TAG}" \
+            --jq '.body')
+          {
+            echo "notes<<EOF"
+            echo "$BODY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           UNSIGNED_NOTE="⚠️ The .xpi in this release is **unsigned** (no AMO signing credentials configured, or signing failed). Install via about:config with xpinstall.signatures.required=false, or use the version listed on addons.mozilla.org for a signed build."
-          NOTES="Release ${TAG}"
+          NOTES="${{ steps.autonotes.outputs.notes }}"
           if [ "${{ steps.sign.outputs.signed }}" != "true" ]; then
             NOTES=$(printf '%s\n\n%s' "$NOTES" "$UNSIGNED_NOTE")
           fi
